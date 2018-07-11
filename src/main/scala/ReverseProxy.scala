@@ -1,5 +1,9 @@
+import java.io.StringWriter
+import java.util.Date
 import java.util.concurrent.TimeUnit
 
+import com.amazonaws.services.securitytoken.model.{AssumeRoleWithWebIdentityResult, AssumedRoleUser, Credentials}
+import javax.xml.stream.XMLOutputFactory
 import lol.http._
 
 import scala.concurrent.ExecutionContext.Implicits.global
@@ -58,7 +62,7 @@ object ReverseProxy {
 
         println(request.path)
         println(request.from)
-
+        println(request.content)
 
         val fwds = forwarders(request.headers).getOrElse(Array[String]())
 
@@ -83,13 +87,19 @@ object ReverseProxy {
         println(" CLIENT IP " + s3req.clientIp + " REMOTE: " + s3req.remoteAddr + " PATH: " + request.path + " QUERY: " + request.url)
         val response = request.method match {
           case GET =>
-            s3req.accessType = RangerS3Authorizer.READ
-            if (authorizer.checkPermission(s3req)) {
-              client {
-                request
-              }
+            if (request.path.startsWith("/sts")) {
+              println("Yes!")
+              val id = new AssumeRoleWithWebIdentityResult()
+              pureResponse(Ok("ok!"))
             } else {
-              pureResponse(Forbidden("Access denied"))
+              s3req.accessType = RangerS3Authorizer.READ
+              if (authorizer.checkPermission(s3req)) {
+                client {
+                  request
+                }
+              } else {
+                pureResponse(Forbidden("Access denied"))
+              }
             }
           case HEAD =>
             s3req.accessType = RangerS3Authorizer.READ
@@ -110,13 +120,107 @@ object ReverseProxy {
               pureResponse(Forbidden("Access denied"))
             }
           case POST =>
-            s3req.accessType = RangerS3Authorizer.READ
-            if (authorizer.checkPermission(s3req)) {
-              client {
-                request
-              }
+            if (request.path.startsWith("/sts")) {
+              val writer = new StringWriter()
+              val xof = XMLOutputFactory.newInstance()
+              val xmlsw = xof.createXMLStreamWriter(writer)
+              val id = new AssumeRoleWithWebIdentityResult()
+
+              val creds = new Credentials().withExpiration(new Date)
+              id.setCredentials(creds)
+              id.setAssumedRoleUser(new AssumedRoleUser)
+
+              id.setSubjectFromWebIdentityToken("IMTHESUBJECT")
+              id.setAudience("MYAUDIENCE")
+
+              xmlsw.setDefaultNamespace("https://sts.amazonaws.com/doc/2011-06-15/")
+              xmlsw.writeStartDocument("UTF-8", "1.0")
+              xmlsw.writeStartElement("AssumeRoleWithWebIdentityResponse")
+
+              xmlsw.writeStartElement("AssumeRoleWithWebIdentityResult")
+
+              // subject
+              xmlsw.writeStartElement("SubjectFromWebIdentityToken")
+              xmlsw.writeCharacters(id.getSubjectFromWebIdentityToken)
+              xmlsw.writeEndElement()
+
+              // audience
+              xmlsw.writeStartElement("Audience")
+              xmlsw.writeCharacters(id.getAudience)
+              xmlsw.writeEndElement()
+
+              // AssumedRoleUser
+              xmlsw.writeStartElement("AssumedRoleUser")
+
+              xmlsw.writeStartElement("Arn")
+              xmlsw.writeCharacters(id.getAssumedRoleUser.getArn)
+              xmlsw.writeEndElement()
+
+              xmlsw.writeStartElement("AssumedRoleId")
+              xmlsw.writeCharacters(id.getAssumedRoleUser.getAssumedRoleId)
+              xmlsw.writeEndElement()
+
+              // end assumedroleuser
+              xmlsw.writeEndElement()
+
+              // credentials
+              xmlsw.writeStartElement("Credentials")
+
+              xmlsw.writeStartElement("SessionToken")
+              xmlsw.writeCharacters(id.getCredentials.getSessionToken)
+              xmlsw.writeEndElement()
+
+              xmlsw.writeStartElement("SecretAccessKey")
+              xmlsw.writeCharacters(id.getCredentials.getSecretAccessKey)
+              xmlsw.writeEndElement()
+
+              xmlsw.writeStartElement("AccessKey")
+              xmlsw.writeCharacters(id.getCredentials.getAccessKeyId)
+              xmlsw.writeEndElement()
+
+              xmlsw.writeStartElement("Expiration")
+              xmlsw.writeCharacters(id.getCredentials.getExpiration.toString) // might need formatter
+              xmlsw.writeEndElement()
+
+              // end credentials
+              xmlsw.writeEndElement()
+
+              xmlsw.writeStartElement("Provider")
+              xmlsw.writeCharacters("KeyCloak") // might need formatter
+              xmlsw.writeEndElement()
+
+              // end AssumeRoleWithWebIdentityResult
+              xmlsw.writeEndElement()
+
+              // Response Metadata
+              xmlsw.writeStartElement("ResponseMetadata")
+
+              xmlsw.writeStartElement("RequestId")
+              xmlsw.writeCharacters("GUID-MOST-LIKELY")
+              xmlsw.writeEndElement()
+
+              // Response Metadata
+              xmlsw.writeEndElement()
+
+              // end XML document// end XML document
+
+              xmlsw.writeEndDocument
+              xmlsw.flush
+              xmlsw.close
+
+              val xmlstr = writer.getBuffer.toString
+
+              println(xmlstr)
+              pureResponse(Ok(xmlstr))
             } else {
-              pureResponse(Forbidden("Access denied"))
+              s3req.accessType = RangerS3Authorizer.READ
+              if (authorizer.checkPermission(s3req)) {
+                client {
+                  request
+                }
+              } else {
+                pureResponse(Forbidden("Access denied"))
+              }
             }
           case DELETE =>
             s3req.accessType = RangerS3Authorizer.READ
